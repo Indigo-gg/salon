@@ -1,0 +1,12 @@
+{
+  "id": "marxist",
+  "name": "马格",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [],
+  "avatar": "🧐",
+  "gender": "male",
+  "voice": "苏打",
+  "voice_description": "严肃、有力、充满热忱的男性声音，语速稳健有节奏感，在论述关键观点时声音会逐渐加强，带有鼓动人心的力量。",
+  "soul_path": "config\\souls\\marxist.md"
+}

@@ -1,0 +1,168 @@
+# ============================================================
+# Salon 多智能体对话协作系统 — 默认配置
+# ============================================================
+# 如需覆盖默认值，请复制此文件为 local.yaml 并修改
+
+# --- LLM 连接配置 ---
+llm:
+  api_base: "https://api.openai.com/v1"     # API 端点，兼容 OpenAI 规范
+  api_key: ""                                 # API 密钥，建议使用环境变量 SALON_API_KEY
+  model: "gpt-4o"                            # 默认模型
+  use_native_thinking: false                 # 是否使用原生思考模型（开启后将卸载提示词中的思维链约束）
+  temperature: 0.8                           # 生成温度 (0.0-2.0)，讨论场景建议 0.7-0.9
+  max_tokens: 2000                           # 单次生成最大 token 数
+  timeout: 60                                # API 超时时间（秒）
+  retry_count: 3                             # 失败重试次数
+  retry_delay: 2                             # 重试间隔（秒）
+
+# --- 讨论参数 ---
+discussion:
+  language: "zh"                             # 讨论语言：zh(中文) / en(英文)
+  max_rounds: 50                             # 单场次最大轮次
+  min_rounds: 10                             # 最少讨论轮次（防止过早结束）
+  max_speech_chars: 1000                     # 每轮发言最大字数
+  min_speech_chars: 50                       # 每轮发言最少字数（避免敷衍）
+  default_participant_count: 3               # 默认参与者数量 (3-5)
+  topic_exhaustion_check_interval: 5         # 每隔几轮主持人检查议题是否充分讨论
+  default_moderator: "moderator"              # 默认主持人的 agent ID，可在启动时通过 --moderator 覆盖
+  default_scribe: "scribe"                    # 默认记录员的 agent ID，可在启动时通过 --scribe 覆盖
+
+# --- 轮次监控配置（Round Monitor）---
+# 轻量信号计算器，不引入额外 LLM 调用，仅在问题出现时向主持人注入条件性提示
+monitor:
+  enabled: true                              # 是否启用轮次监控
+  density_high_threshold: 3.0                # 每轮超过此概念数视为高密度
+  consecutive_high_trigger: 3                # 连续N轮高密度触发密度警报
+  rounds_since_story_trigger: 5              # N轮无具体故事触发着陆提示
+  rounds_since_anchor_trigger: 8             # N轮未显式回锚原始问题触发锚定提示
+  dormant_concept_threshold: 3               # 概念N轮未被引用标记为dormant
+  extend_ratio_threshold: 0.8                # 最近5轮Extend意图占比超过此值触发失衡警报
+  breathing_suggestion: "考虑用一个具体的生活场景或故事来回应当前讨论，而不是引入新的理论框架。"
+  # 可读性信号：站在人类观众视角监控讨论的可理解程度
+  readability_abstract_threshold: 0.4             # 抽象词汇占比超过此值视为高不可读
+  readability_long_sentence_threshold: 0.3        # 长句（>40字）占比超过此值视为高不可读
+  readability_entropy_threshold: 4.5              # 信息熵超过此值视为高不可读
+  readability_consecutive_trigger: 3              # 连续N轮高不可读触发主持人干预
+
+  # 调度器防线：三层架构（Pre-LLM 注入 → LLM 决策 → Post-LLM 兜底）
+  novelty_low_threshold: 0.2                      # novelty_score 低于此值视为高重复（更保守，避免误判）
+  repetition_topic_shift_speeches: 12             # 基础值，实际运行时按 max(6, 参与者数*1.5) 动态计算
+  repetition_exhausted_speeches: 20               # 基础值，实际运行时按 max(10, 参与者数*2.5) 动态计算
+  recent_speak_window: 3                          # 发言统计注入的滑动窗口大小（轮）
+  closing_window_min: 2                           # 尾声窗口最小值（轮）
+  closing_window_max: 5                           # 尾声窗口最大值（轮）
+  anchor_soft_trigger: 6                          # 轮未回锚 → 温和提醒
+  anchor_medium_trigger: 10                       # 轮未回锚 → 中等提醒
+  anchor_hard_trigger: 15                         # 轮未回锚 → 强制罗盘检查
+
+# --- 记忆系统配置 ---
+memory:
+  # 对话流 (第 1 层)
+  conversation_stream:
+    recent_messages_count: 12                # 保留完整的最近消息条数
+    summary_batch_size: 5                    # 每次摘要化的消息批次大小
+
+  # 个人笔记本 (第 2 层)
+  notebook:
+    max_tokens: 1000                         # 笔记本最大 token 数
+    cleanup_interval: 5                      # 每隔几轮整理一次笔记本
+    sections:                                # 笔记本包含的固定板块
+      - "core_stance"                        # 核心立场
+      - "pending_responses"                  # 待回应的点
+      - "expressed_points"                   # 已表达的观点
+      - "learned_from_others"                # 从别人那里学到的
+      - "evolution_summary"                  # 思想演化摘要
+
+  # 共享白板 (第 3 层)
+  whiteboard:
+    max_tokens: 1500                         # 白板最大 token 数
+    auto_update_interval: 5                  # 白板自动更新间隔（轮）
+    compression_threshold_chars: 800         # 白板总字数超过此值时触发 Scribe 压缩任务
+    cold_storage_ttl: 4                      # 条目超过此轮次未更新则自动进入冷板凳（不喂给 LLM，但保留在内存中）
+    sections:                                # 白板包含的固定板块
+      - "current_focus"                      # 当前的焦点（疑问句形式）
+      - "discussion_phase"                   # 讨论所处阶段
+      - "current_topic"                      # 全局主题
+      - "consensus"                          # 已达成的共识
+      - "disagreements"                      # 活跃的分歧
+      - "backlog"                            # 议题积压区（合并原 parked + to_explore）
+      - "surprises"                          # 意外发现（超过 3 轮未提及自动丢弃）
+      - "agenda_trace"                       # 议程轨迹（记录讨论路线和阶段变迁）
+      - "active_concepts"                    # 活跃概念清单（由记录员维护的隐喻/术语/概念追踪）
+
+  # 档案馆 (第 4 层)
+  archive:
+    enabled: true                            # 是否启用跨场次记忆
+    retrieval_top_k: 5                       # 检索时返回的最相关条目数
+    retrieval_strategy: "hybrid"             # 检索策略：keyword / semantic / hybrid
+    index_categories:                        # 档案索引分类
+      - "acknowledged_consensus"             # 被他人承认的共识
+      - "brilliant_insights"                 # 自己提出的精彩理论和观点
+      - "similar_patterns"                   # 相似的对话模式
+      - "unresolved_tensions"                # 未解决的分歧历史
+      - "key_references"                     # 关键引用和论据
+
+# --- 上下文窗口管理 ---
+context:
+  max_prompt_tokens: 12000                   # 全量 prompt 的最大 token 数（兼容）
+  allocation:                                # 各区段的 token 预算分配
+    system_prompt: 500                       # 系统提示词（含 soul）
+    soul: 800                                # Soul 人格描述
+    archive_injection: 1000                  # 档案注入
+    whiteboard: 1500                         # 共享白板
+    notebook: 1000                           # 个人笔记本
+    summarized_history: 2000                 # 摘要化的早期对话
+    recent_messages: 2000                    # 最近的原始对话（从 5000 降到 2000）
+    action_prompt: 200                       # 发言指令
+  reserve_for_generation: 2000               # 预留给模型生成的 token 数
+  # 按行动类型的 token 预算（减少不必要的上下文浪费）
+  intent_max_tokens: 800                     # 意图收集：仅 topic + 白板焦点 + 上轮摘要
+  speak_max_tokens: 5000                     # 发言：topic + 白板 + 最近 2 轮 + 摘要 + 笔记本
+  moderator_max_tokens: 8000                 # 主持人决策：topic + 全景白板 + 最近 3 轮 + 摘要
+  scribe_max_tokens: 3000                    # 记录员同步：topic + 全景白板 + 最近 2 轮
+
+# --- 人类介入配置 ---
+human:
+  default_role: "observer"                   # 默认介入模式：chair / participant / observer
+  input_timeout: 30                          # 等待人类输入的超时时间（秒）
+  auto_skip_on_timeout: true                 # 超时后是否自动跳过（转移给下一位）
+  ai_chair_takeover_timeout: 60              # 人类主持人无响应后 AI 自动接管的超时（秒）
+  pause_behavior: "finish_current"           # 暂停行为：finish_current(当前发言完成后暂停) / immediate(立即暂停)
+  at_human_timeout: 15                       # @人类后等待回复的超时时间（秒）
+
+# --- 产出物配置 ---
+output:
+  transcript:
+    format: "jsonl"                          # 原始记录格式
+    include_metadata: true                   # 是否包含元数据（发言类型、时间戳等）
+  digest:
+    auto_generate: true                      # 讨论结束后是否自动生成纪要
+    format: "markdown"                       # 纪要格式
+  report:
+    auto_generate: false                     # 是否自动生成终稿报告
+    format: "markdown"                       # 报告格式
+  notebook_history:
+    save_versions: true                      # 是否保存笔记本的版本历史
+    snapshot_interval: 5                     # 每隔几轮保存一个快照
+
+# --- 搜索配置 ---
+search:
+  enabled: false                             # 是否启用网络搜索（Agent 需要找证据时自动搜索）
+  api_key: ""                                # Tavily API Key（留空则从环境变量 TAVILY_API_KEY 读取）
+  max_results: 3                             # 每次搜索返回的最大结果数
+  max_queries_per_intent: 2                  # 每个意图最多搜索几次
+
+# --- 存储配置 ---
+storage:
+  base_dir: "data"                           # 数据根目录
+  sessions_dir: "data/sessions"              # 场次数据目录
+  archives_dir: "data/archives"              # 档案馆目录
+  encoding: "utf-8"                          # 文件编码
+
+# --- 日志配置 ---
+logging:
+  level: "INFO"                              # 日志级别：DEBUG / INFO / WARNING / ERROR
+  file: "data/salon.log"                     # 日志文件路径
+  console: true                              # 是否输出到控制台
+  decision_log: true                         # 是否在终端实时打印决策面板（stderr）
+  signal_log: false                          # 是否在日志中记录每轮信号值（VERBOSE，开 DEBUG 时自动生效）

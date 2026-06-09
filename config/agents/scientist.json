@@ -1,0 +1,14 @@
+{
+  "id": "scientist",
+  "name": "达文",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [
+    "科学家"
+  ],
+  "avatar": "🧔",
+  "gender": "male",
+  "voice": "苏打",
+  "voice_description": "清晰、理性、严谨的男性声音，吐字精准，语速适中，语调平稳但带有好奇与探究的感觉，像在讲述一个有趣的科学发现。",
+  "soul_path": "config\\souls\\scientist.md"
+}

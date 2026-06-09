@@ -1,0 +1,14 @@
+{
+  "id": "philosopher_east",
+  "name": "惠子",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [
+    "东方哲学"
+  ],
+  "avatar": "☯️",
+  "gender": "female",
+  "voice": "冰糖",
+  "voice_description": "温和、从容、带有诗意的女性声音，语速缓慢而流畅，声音温暖醇厚，给人一种超然世外的宁静感。",
+  "soul_path": "config\\souls\\philosopher_east.md"
+}

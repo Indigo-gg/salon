@@ -1,0 +1,12 @@
+{
+  "id": "existentialist",
+  "name": "阿尔贝",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [],
+  "avatar": "🚬",
+  "gender": "male",
+  "voice": "白桦",
+  "voice_description": "沉思的、深沉的男性声音，语气低沉有磁性，仿佛在思考存在的意义。",
+  "soul_path": "config\\souls\\existentialist.md"
+}

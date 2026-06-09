@@ -1,0 +1,12 @@
+{
+  "id": "debater_a2",
+  "name": "苏问",
+  "role": "participant",
+  "group": "grp_4c3bbb2d",
+  "tags": [],
+  "avatar": "😡",
+  "gender": "female",
+  "voice": "冰糖",
+  "voice_description": "",
+  "soul_path": "config\\souls\\debater_a2.md"
+}

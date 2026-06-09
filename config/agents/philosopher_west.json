@@ -1,0 +1,14 @@
+{
+  "id": "philosopher_west",
+  "name": "卡尔",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [
+    "西方哲学"
+  ],
+  "avatar": "📚",
+  "gender": "male",
+  "voice": "白桦",
+  "voice_description": "坚定有力的男性声音，语速偏快，讲到关键论点时语气会明显上扬，带有说服力和感染力。",
+  "soul_path": "config\\souls\\philosopher_west.md"
+}

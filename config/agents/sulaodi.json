@@ -1,0 +1,12 @@
+{
+  "id": "sulaodi",
+  "name": "苏老迪",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [],
+  "avatar": "🏛️",
+  "gender": "male",
+  "voice": "苏打",
+  "voice_description": "沉稳、睿智、从容的男性声音，语速适中，语气温和但带有权威感，偶尔会刻意停顿以加强表达力。",
+  "soul_path": "config\\souls\\sulaodi.md"
+}

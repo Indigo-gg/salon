@@ -1,0 +1,12 @@
+{
+  "id": "annie",
+  "name": "安妮",
+  "role": "participant",
+  "group": "哲学家圈子",
+  "tags": [],
+  "avatar": "📝",
+  "gender": "female",
+  "voice": "茉莉",
+  "voice_description": "温柔、专注、沉静的女性声音，语速均匀，吐字清晰但音量偏轻柔，给人一种认真倾听与记录的感觉。",
+  "soul_path": "config\\souls\\annie.md"
+}
