@@ -125,6 +125,8 @@ class SignalObserver:
         # LLM 辅助信号缓存
         self._llm_emotional_temperature: float = 0.5
         self._llm_perceived_tension: str = "moderate"
+        # EMA 平滑的情绪温度（首值直通，避免首轮平滑后值严重偏低）
+        self._temp_ema: EMA | None = None
 
         # 原始信号缓存（用于映射规则中的跨维度查询）
         self._last_raw: RawSignals | None = None
@@ -176,10 +178,15 @@ class SignalObserver:
         return self.control
 
     def update_llm_feedback(self, emotional_temperature: float, perceived_tension: str) -> None:
-        """接收主持人 LLM 的反馈信号。"""
-        self._llm_emotional_temperature = emotional_temperature
+        """接收主持人 LLM 的反馈信号。情绪温度做 EMA 平滑，紧张度仅存储。"""
+        # 情绪温度：EMA 平滑（复用已有 EMA 类，首值直通）
+        if self._temp_ema is None:
+            self._temp_ema = EMA(half_life=3.0, initial_value=emotional_temperature)
+        smoothed = self._temp_ema.update(emotional_temperature)
+        self._llm_emotional_temperature = smoothed
+        self.control.llm_emotional_temperature = smoothed
+        # 紧张度：仅存储，由 _map_to_control 中的代码规则主导
         self._llm_perceived_tension = perceived_tension
-        self.control.llm_emotional_temperature = emotional_temperature
         self.control.llm_perceived_tension = perceived_tension
 
     # ----- 归一化函数 -----
@@ -292,30 +299,35 @@ class SignalObserver:
         drift_pressure = (1.0 - s.direction) * (1.0 + max(0.0, -s.delta_direction))
         ctrl.topic_focus_alert = max(0.0, min(1.0, drift_pressure))
 
-        # 4. 对话张力
-        # 优先使用 LLM 感知的张力（如果有）
-        if self._llm_perceived_tension in ("low", "high", "conflict"):
-            ctrl.tension_level = self._llm_perceived_tension
-        else:
-            # 规则映射
-            if s.formation < 0.3:
-                # formation 极低：要么独白垄断，要么各说各话
-                # 单人发言 → 必然是独白
-                # 多人但 Gini 高 → 独白垄断
-                # 多人且 Gini 低 → 各说各话
-                if self._last_raw:
-                    if self._last_raw.speaker_count <= 1:
-                        ctrl.tension_level = "monologue"
-                    elif self._last_raw.gini_coefficient > 0.4:
-                        ctrl.tension_level = "monologue"
-                    else:
-                        ctrl.tension_level = "parallel"
+        # 4. 对话张力（代码规则主导，LLM 反馈仅 ±1 级微调）
+        # 先由代码规则计算基础张力
+        if s.formation < 0.3:
+            if self._last_raw:
+                if self._last_raw.speaker_count == 0:
+                    base_tension = "moderate"
+                elif self._last_raw.speaker_count == 1:
+                    base_tension = "monologue"
+                elif self._last_raw.gini_coefficient > 0.4:
+                    base_tension = "monologue"
                 else:
-                    ctrl.tension_level = "parallel"
-            elif s.formation > 0.7:
-                ctrl.tension_level = "heated" if self._llm_emotional_temperature > 0.7 else "debate"
+                    base_tension = "parallel"
             else:
-                ctrl.tension_level = "moderate"
+                base_tension = "moderate"
+        elif s.formation > 0.7:
+            base_tension = "heated" if self._llm_emotional_temperature > 0.7 else "debate"
+        else:
+            base_tension = "moderate"
+
+        # LLM 反馈仅允许 ±1 级调整，不能跳级
+        tension_order = ["monologue", "parallel", "moderate", "debate", "heated", "conflict"]
+        llm_tension = self._llm_perceived_tension
+        if llm_tension in tension_order:
+            base_idx = tension_order.index(base_tension)
+            llm_idx = tension_order.index(llm_tension)
+            clamped_idx = max(base_idx - 1, min(base_idx + 1, llm_idx))
+            ctrl.tension_level = tension_order[clamped_idx]
+        else:
+            ctrl.tension_level = base_tension
 
         # 5. 认知能量
         if s.delta_speed < -0.15 and s.formation < 0.4:

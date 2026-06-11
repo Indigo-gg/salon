@@ -22,6 +22,7 @@ from src.core.session import SessionManager, SessionState
 from src.human.commands import ParsedCommand
 from src.human.interface import HumanInterface
 from src.llm.client import LLMClient
+from src.llm.token_tracker import TokenUsageTracker
 from src.llm.prompts import build_round_info, build_summary_prompt
 from src.memory import MemorySystem
 from src.memory.stream import Message
@@ -52,7 +53,8 @@ class Orchestrator:
         self.session_manager = SessionManager(config)
         self.context_manager = ContextManager(config)
         self.human_interface = HumanInterface(config.human)
-        self.llm_client = LLMClient(config.llm)
+        self.token_tracker = TokenUsageTracker()
+        self.llm_client = LLMClient(config.llm, tracker=self.token_tracker)
         self.participants: list[ParticipantAgent] = []
         self.state = SessionState.CREATED
         self._ctx: ModeContext | None = None  # 在 run() 中初始化
@@ -89,6 +91,7 @@ class Orchestrator:
             transcript=transcript,
             session_manager=self.session_manager,
             command_source=CLITerminalCommandSource(self.human_interface),
+            token_tracker=self.token_tracker,
         )
 
         # 策略初始化（辩论模式需要额外配置）
@@ -187,6 +190,9 @@ class Orchestrator:
             self._maybe_summarize(ctx)
             self._scribe_sync(ctx)
 
+            # 每轮结束后保存 token 用量（防止崩溃丢失）
+            self._save_token_usage()
+
         # CLOSING 轮
         if not ctx._ended and ctx.moderator:
             self._closing_round(ctx)
@@ -246,13 +252,25 @@ class Orchestrator:
 
         for agent in ctx.participants:
             agent_ctx = ctx.context_manager.build_context(agent, ctx.memory, round_num)
-            output = agent.speak(agent_ctx, ctx.llm, round_info=round_info)
+            if ctx.token_tracker:
+                ctx.token_tracker.set_context(agent_id=agent.agent_id, context_type="closing")
+            try:
+                output = agent.speak(agent_ctx, ctx.llm, round_info=round_info)
+            finally:
+                if ctx.token_tracker:
+                    ctx.token_tracker.clear_context()
             _process_speech(ctx, agent, output, round_num)
 
         # Final whiteboard sync
         if ctx.scribe:
             scribe_ctx = ctx.context_manager.build_context(ctx.scribe, ctx.memory, round_num)
-            sync_result = ctx.scribe.sync_whiteboard(scribe_ctx, ctx.llm)
+            if ctx.token_tracker:
+                ctx.token_tracker.set_context(agent_id="scribe", context_type="scribe")
+            try:
+                sync_result = ctx.scribe.sync_whiteboard(scribe_ctx, ctx.llm)
+            finally:
+                if ctx.token_tracker:
+                    ctx.token_tracker.clear_context()
             if sync_result and sync_result.operations:
                 for op in sync_result.operations:
                     ctx.memory.whiteboard.update(
@@ -364,7 +382,7 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _maybe_summarize(self, ctx: ModeContext) -> None:
-        messages = ctx.memory.stream.get_messages_for_summarization()
+        messages = ctx.memory.stream.get_messages_for_summarization(max_rounds=3)
         if messages is None:
             return
 
@@ -373,11 +391,19 @@ class Orchestrator:
         topic_text = topic[0].content if topic else "discussion"
 
         summary_messages = build_summary_prompt(topic_text, text)
+        if ctx.token_tracker:
+            ctx.token_tracker.set_context(context_type="summary")
         try:
             summary = ctx.llm.chat(summary_messages)
-            ctx.memory.stream.add_summary(summary, messages[0].round, messages[-1].round)
+            from_round = messages[0].round
+            to_round = messages[-1].round
+            ctx.memory.stream.add_summary(summary, from_round, to_round)
+            logger.info(f"[Summary] Rounds {from_round}-{to_round}:\n{summary}")
         except Exception as e:
             logger.warning(f"Summarization failed: {e}")
+        finally:
+            if ctx.token_tracker:
+                ctx.token_tracker.clear_context()
 
     def _scribe_sync(self, ctx: ModeContext) -> None:
         """定期白板同步。"""
@@ -521,7 +547,13 @@ class Orchestrator:
         try:
             if ctx.scribe:
                 scribe_ctx = ctx.context_manager.build_context(ctx.scribe, ctx.memory, ctx.round_num)
-                overview = ctx.scribe.generate_overview(scribe_ctx, ctx.llm)
+                if ctx.token_tracker:
+                    ctx.token_tracker.set_context(agent_id="scribe", context_type="overview")
+                try:
+                    overview = ctx.scribe.generate_overview(scribe_ctx, ctx.llm)
+                finally:
+                    if ctx.token_tracker:
+                        ctx.token_tracker.clear_context()
                 if overview:
                     print(f"\n--- 讨论概览 ---\n{overview}")
 
@@ -544,7 +576,24 @@ class Orchestrator:
         print("  讨论已完成")
         print(f"{'='*60}")
 
+    def _save_token_usage(self) -> None:
+        """保存 token 用量统计到磁盘（定期调用，防止崩溃丢失）。"""
+        try:
+            token_path = self.session_manager.get_token_usage_path()
+            if token_path and self.token_tracker.call_count > 0:
+                self.token_tracker.save(token_path)
+        except Exception as e:
+            logger.warning(f"Failed to save token usage: {e}")
+
     def _cleanup(self) -> None:
+        self._save_token_usage()
+        if self.token_tracker.call_count > 0:
+            summary = self.token_tracker.summary()
+            logger.info(
+                f"Token usage: {summary['call_count']} calls, "
+                f"{summary['total_tokens']} tokens "
+                f"(prompt={summary['total_prompt_tokens']}, completion={summary['total_completion_tokens']})"
+            )
         self.llm_client.close()
 
     def _now_iso(self) -> str:
@@ -580,6 +629,10 @@ def _process_speech(ctx: ModeContext, agent: BaseAgent, output, round_num: int, 
             }
             for h in tool_history
         ]
+    # Mode A 原生思维链
+    native_thinking = getattr(agent, '_last_thinking', '')
+    if native_thinking and not output.thought:
+        metadata["native_thinking"] = native_thinking
     message = Message(
         id=f"msg_{round_num:04d}_{agent.agent_id}",
         round=round_num,

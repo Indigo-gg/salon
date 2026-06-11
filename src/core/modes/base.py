@@ -15,14 +15,16 @@ from typing import TYPE_CHECKING, Callable
 if TYPE_CHECKING:
     from src.agents.base import BaseAgent
     from src.agents.moderator import ModeratorAgent
-    from src.agents.scribe import ScribeAgent
+    from src.agents.scribe import RoundAnalysis, ScribeAgent
     from src.config import SalonConfig
     from src.core.context_manager import ContextManager
     from src.core.moderator_signal import ModeratorSignalSystem
     from src.core.round_monitor import RoundMonitor
     from src.core.scheduling_state import SchedulingState
     from src.core.session import SessionManager
+    from src.core.session_controller import SessionController, RoundDirective
     from src.llm.client import LLMClient
+    from src.llm.token_tracker import TokenUsageTracker
     from src.memory import MemorySystem
     from src.output.transcript import TranscriptWriter
 
@@ -92,6 +94,16 @@ class ModeContext:
     round_monitor: RoundMonitor | None = None
     signal_system: ModeratorSignalSystem | None = None
     scheduling_state: SchedulingState | None = None
+    session_ctrl: SessionController | None = None  # 聚合调度器（Phase 2 新增）
+    current_directive: RoundDirective | None = None  # 本轮指令集
+
+    # 战略家（阶段 3 新增）
+    strategist: object | None = None  # TopicStrategist（避免循环导入）
+    last_strategy: object | None = None  # StrategyOutput
+    _forced_callouts: set = field(default_factory=set)  # 被强制点名的 agent ID
+
+    # 记录员分析结果（阶段 1 新增）
+    last_round_analysis: RoundAnalysis | None = None
 
     # 运行时状态（由框架层管理）
     round_num: int = 0
@@ -101,6 +113,9 @@ class ModeContext:
 
     # 事件回调（Web 模式用，CLI 模式为 None）
     emit_event: Callable[[str, dict], None] | None = None
+
+    # Token 追踪器（可选，系统监控用）
+    token_tracker: TokenUsageTracker | None = None
 
     @property
     def max_rounds(self) -> int:

@@ -20,6 +20,7 @@ from src.core.context_manager import ContextManager
 from src.core.modes import ModeContext, ModeFactory, WebCommandSource
 from src.core.session import SessionManager, SessionState
 from src.llm.client import LLMClient
+from src.llm.token_tracker import TokenUsageTracker
 from src.llm.prompts import build_round_info, build_summary_prompt
 from src.memory import MemorySystem
 from src.memory.stream import Message
@@ -98,7 +99,8 @@ class WebOrchestrator:
 
         # Core components
         self.context_manager = ContextManager(config)
-        self.llm_client = LLMClient(config.llm)
+        self.token_tracker = TokenUsageTracker()
+        self.llm_client = LLMClient(config.llm, tracker=self.token_tracker)
         self.memory: MemorySystem | None = None
         self.moderator: ModeratorAgent | None = None
         self.scribe: ScribeAgent | None = None
@@ -219,6 +221,7 @@ class WebOrchestrator:
             session_manager=self.session_manager,
             command_source=WebCommandSource(self.cmd_queue),
             emit_event=self._emit,
+            token_tracker=self.token_tracker,
         )
 
         # 初始化搜索工具和工具注册表
@@ -502,9 +505,10 @@ class WebOrchestrator:
             # 每轮结束后持久化白板（JSON），防止崩溃丢失
             self._persist_whiteboard()
 
-            # Periodic full checkpoint every 5 rounds (JSON + Markdown + metadata)
+            # Periodic full checkpoint every 5 rounds (JSON + Markdown + metadata + token_usage)
             if ctx.round_num > 0 and ctx.round_num % 5 == 0:
                 self._save_checkpoint()
+                self._save_token_usage()
 
             self._update_metadata()
 
@@ -1100,7 +1104,7 @@ class WebOrchestrator:
             logger.warning(f"[ScribeSync] 写入日志失败: {e}")
 
     def _maybe_summarize(self) -> None:
-        messages = self.memory.stream.get_messages_for_summarization()
+        messages = self.memory.stream.get_messages_for_summarization(max_rounds=3)
         if messages is None:
             return
 
@@ -1111,11 +1115,33 @@ class WebOrchestrator:
         summary_messages = build_summary_prompt(topic_text, text)
         try:
             summary = self.llm_client.chat(summary_messages)
-            self.memory.stream.add_summary(
-                summary, messages[0].round, messages[-1].round,
-            )
+            from_round = messages[0].round
+            to_round = messages[-1].round
+            self.memory.stream.add_summary(summary, from_round, to_round)
+            self._write_summary_log(from_round, to_round, summary, messages)
         except Exception as e:
             logger.warning(f"Summarization failed: {e}")
+
+    def _write_summary_log(self, from_round: int, to_round: int, summary: str, original_messages: list) -> None:
+        """将摘要内容写入 scribe_sync.log，与白板操作日志合并。"""
+        try:
+            if not self.session_manager or not self.session_manager.session_dir:
+                return
+            log_path = self.session_manager.session_dir / "scribe_sync.log"
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{'='*60}\n")
+                f.write(f"[{timestamp}] 摘要 | Rounds {from_round}-{to_round}\n")
+                f.write(f"  摘要内容:\n")
+                for line in summary.strip().split("\n"):
+                    f.write(f"    {line}\n")
+                f.write(f"  原始消息 ({len(original_messages)} 条):\n")
+                for m in original_messages:
+                    content_preview = m.content[:100] + ("..." if len(m.content) > 100 else "")
+                    f.write(f"    [R{m.round}] {m.agent_name}: {content_preview}\n")
+        except Exception as e:
+            logger.warning(f"[Summary] 写入摘要日志失败: {e}")
 
     # ------------------------------------------------------------------
     # Commands
@@ -1273,7 +1299,25 @@ class WebOrchestrator:
             self.session_manager.finish()
         self._update_metadata()
 
+    def _save_token_usage(self) -> None:
+        """保存 token 用量统计到磁盘（定期调用，防止崩溃丢失）。"""
+        try:
+            if self.session_manager and self.token_tracker.call_count > 0:
+                token_path = self.session_manager.get_token_usage_path()
+                if token_path:
+                    self.token_tracker.save(token_path)
+        except Exception as e:
+            logger.warning(f"Failed to save token usage: {e}")
+
     def _cleanup(self) -> None:
+        self._save_token_usage()
+        if self.token_tracker.call_count > 0:
+            summary = self.token_tracker.summary()
+            logger.info(
+                f"Token usage: {summary['call_count']} calls, "
+                f"{summary['total_tokens']} tokens "
+                f"(prompt={summary['total_prompt_tokens']}, completion={summary['total_completion_tokens']})"
+            )
         self._bg_executor.shutdown(wait=False)
         self.llm_client.close()
 

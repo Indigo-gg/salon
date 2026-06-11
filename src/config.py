@@ -41,11 +41,11 @@ class DiscussionConfig:
     min_speech_chars: int = 50
     default_participant_count: int = 3
     topic_exhaustion_check_interval: int = 5
+    max_rounds_per_dimension: int = 8  # 每维度最大讨论轮次（硬截断）
 
 
 @dataclass
 class ConversationStreamConfig:
-    recent_messages_count: int = 5
     summary_batch_size: int = 5
 
 
@@ -62,7 +62,7 @@ class WhiteboardConfig:
         "current_focus", "discussion_phase", "current_topic",
         "consensus", "disagreements", "backlog",
         "surprises", "agenda_trace", "active_concepts",
-        "search_materials", "concept_load",
+        "search_materials", "concept_load", "dimension_map",
     ])
 
 
@@ -109,7 +109,7 @@ class ContextConfig:
     allocation: ContextAllocation = field(default_factory=ContextAllocation)
     reserve_for_generation: int = 2000
     # 按行动类型的 token 预算
-    intent_max_tokens: int = 800             # 意图收集（极简）
+    intent_max_tokens: int = 1200            # 意图收集（含最近 1 轮消息）
     speak_max_tokens: int = 5000             # 发言（精简）
     moderator_max_tokens: int = 8000         # 主持人决策（较完整）
     scribe_max_tokens: int = 3000            # 记录员同步（白板+近期）
@@ -210,12 +210,12 @@ def _build_config_from_dict(data: dict[str, Any]) -> SalonConfig:
     )
 
     disc_raw = data.get("discussion", {})
-    discussion = DiscussionConfig(**{k: disc_raw.get(k, v) for k, v in DiscussionConfig().__dict__.items()})
+    _disc_defaults = DiscussionConfig()
+    discussion = DiscussionConfig(**{k: disc_raw.get(k, v) for k, v in _disc_defaults.__dict__.items()})
 
     mem_raw = data.get("memory", {})
     cs_raw = mem_raw.get("conversation_stream", {})
     conversation_stream = ConversationStreamConfig(
-        recent_messages_count=cs_raw.get("recent_messages_count", ConversationStreamConfig.recent_messages_count),
         summary_batch_size=cs_raw.get("summary_batch_size", ConversationStreamConfig.summary_batch_size),
     )
 

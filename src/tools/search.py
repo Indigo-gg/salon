@@ -58,7 +58,7 @@ class WebSearchTool:
                 results.append(SearchResult(
                     title=item.get("title", ""),
                     url=item.get("url", ""),
-                    snippet=item.get("content", "")[:500],
+                    snippet=item.get("content", "")[:800],
                 ))
             logger.info(f"Search '{query}' returned {len(results)} results")
             return results
@@ -89,7 +89,7 @@ class WebSearchTool:
                 results.append(SearchResult(
                     title=item.get("title", ""),
                     url=item.get("url", ""),
-                    snippet=item.get("content", "")[:500],
+                    snippet=item.get("content", "")[:800],
                 ))
             logger.info(f"Search '{query}' returned {len(results)} results")
             return results
@@ -98,13 +98,23 @@ class WebSearchTool:
             logger.warning(f"Search failed for '{query}': {e}")
             return []
 
-    def format_results(self, results: list[SearchResult], max_snippet: int = 300) -> str:
+    def format_results(self, results: list[SearchResult], max_snippet: int = 600) -> str:
         """将搜索结果格式化为可注入 prompt 的文本。精炼版：标题+摘要+来源。"""
         if not results:
             return ""
         lines = []
         for i, r in enumerate(results, 1):
-            snippet = r.snippet[:max_snippet].rsplit("，", 1)[0] if len(r.snippet) > max_snippet else r.snippet
+            if len(r.snippet) > max_snippet:
+                # 优先在句末标点处截断，保持语句完整
+                truncated = r.snippet[:max_snippet]
+                cut = -1
+                for sep in ["。", ".", "？", "?", "！", "!", "；", ";"]:
+                    pos = truncated.rfind(sep)
+                    if pos > max_snippet * 0.5:
+                        cut = max(cut, pos)
+                snippet = truncated[:cut + 1] if cut >= 0 else truncated.rsplit("，", 1)[0]
+            else:
+                snippet = r.snippet
             # 提取域名作为来源标识
             from urllib.parse import urlparse
             domain = urlparse(r.url).netloc.replace("www.", "")

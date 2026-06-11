@@ -105,3 +105,11 @@ class SessionManager:
         if self.session_dir:
             return self.session_dir / "whiteboard.md"
         return None
+
+    def get_token_usage_path(self) -> Path | None:
+        if self.session_dir:
+            return self.session_dir / "token_usage.json"
+        return None
+
+    def get_session_dir(self) -> Path | None:
+        return self.session_dir

@@ -8,11 +8,40 @@ from pydantic import BaseModel, Field
 from src.agents.base import BaseAgent, DiscussionContext, SpeechOutput
 from src.config import SalonConfig
 from src.llm.prompts import build_speak_prompt
+from src.models import AnchorCoverageCheck
 
 if TYPE_CHECKING:
     from src.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+class ArgumentSummary(BaseModel):
+    """单个发言者的核心论点"""
+    agent_id: str = Field(description="发言者 ID")
+    core_claim: str = Field(description="一句话核心主张")
+    key_metaphor: str | None = Field(default=None, description="本轮引入的关键比喻（如有）")
+    responds_to: str | None = Field(default=None, description="回应了谁的什么观点")
+
+
+class CoveredDimension(BaseModel):
+    """维度覆盖记录（附证据）"""
+    id: str = Field(description="维度 ID")
+    confidence: str = Field(description="置信度", json_schema_extra={"enum": ["high", "low"]})
+    evidence: str = Field(description="触发该维度的发言原句摘要或关键词")
+
+
+
+class RoundAnalysis(BaseModel):
+    """记录员每轮输出的结构化分析"""
+    arguments: list[ArgumentSummary] = Field(default_factory=list, description="每个发言者的核心论点")
+    new_angles: list[str] = Field(default_factory=list, description="本轮出现的新讨论角度（不在已知维度中的）")
+    covered_dimensions: list[CoveredDimension] = Field(default_factory=list, description="本轮触及了已知维度中的哪些（附证据）")
+    convergence_hint: str = Field(default="", description="一句话：当前讨论是否有收敛趋势，为什么")
+    anchor_coverage: AnchorCoverageCheck | None = Field(
+        default=None,
+        description="锚定问题回应检查（如果本轮有锚定问题）"
+    )
 
 
 class WhiteboardOperation(BaseModel):
@@ -22,7 +51,7 @@ class WhiteboardOperation(BaseModel):
     )
     section: str = Field(
         description="要操作的板块（注意：agenda_trace 由主持人自动维护，不可操作）",
-        json_schema_extra={"enum": ["current_focus", "discussion_phase", "current_topic", "consensus", "disagreements", "backlog", "surprises", "active_concepts", "search_materials"]}
+        json_schema_extra={"enum": ["current_focus", "discussion_phase", "current_topic", "consensus", "disagreements", "backlog", "surprises", "active_concepts", "search_materials", "dimension_map"]}
     )
     content: str = Field(default="", description="操作内容。如果是rewrite，请提供凝练的总结覆盖旧内容；如果是delete，提供要删除的完整旧内容以便匹配。clear_section不需要此字段。")
 
@@ -208,6 +237,22 @@ class ScribeAgent(BaseAgent):
             "如果不需要更新，返回空操作列表即可。"
         )
 
+        # 维度地图维护指令
+        action += (
+            "\n\n【维度地图维护】\n"
+            "检查 dimension_map 板块中的维度列表。根据最近的讨论：\n"
+            "- 如果讨论明显触及了某个维度（status 为 blank 或 pending），将其 status 改为 active，depth +1\n"
+            "- 如果某个 active 维度已经充分讨论并达成了基本共识，将其 status 改为 covered\n"
+            "- 如果记录员分析发现了 new_angles（新的讨论角度），将它们作为新维度追加到 dimensions 列表中，status 为 blank\n"
+            "- 维度总数不超过 9 个（含 placeholder）。如果需要新增且已达上限，将一个已 covered 的维度 status 改为 archived\n"
+            "- 如果新增了任何维度（add 操作），同时更新 last_new_dimension_round 为当前轮次\n"
+            "- 使用 rewrite 操作更新整个 dimension_map section\n"
+            "- 如果不需要更新，返回空操作列表即可\n"
+            "\n"
+            "【重要】YAML 格式必须是字典（不是列表），结构如下：\n"
+            "```yaml\ndimensions:\n  - id: xxx\n    label: \"xxx\"\n    status: active\n    depth: 1\n    notes: \"xxx\"\n    type: core\nemergent: []\nlast_new_dimension_round: 3\n```"
+        )
+
         messages = build_speak_prompt(
             agent_name=self.name,
             soul_text=self.soul.get_full_prompt(),
@@ -232,3 +277,95 @@ class ScribeAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"Whiteboard sync failed: {e}")
             return None
+
+    def analyze_round(
+        self,
+        context: DiscussionContext,
+        llm: LLMClient,
+        dimension_labels: list[str],
+        anchor_question: str = "",
+        language: str = "zh",
+    ) -> RoundAnalysis | None:
+        """每轮发言结束后运行，提取结构化论点和维度覆盖信息。
+
+        Args:
+            context: 记录员的讨论上下文（scribe 类型，含完整白板和最近发言）
+            llm: LLM 客户端
+            dimension_labels: 当前维度地图的 label 列表
+            anchor_question: 本轮的锚定问题（如有），用于检查是否被回应
+            language: 语言
+
+        Returns:
+            RoundAnalysis 或 None（解析失败时）
+        """
+        action = self._build_analysis_action(dimension_labels, anchor_question)
+
+        messages = build_speak_prompt(
+            agent_name=self.name,
+            soul_text=self.soul.get_full_prompt(),
+            topic=context.topic,
+            whiteboard=context.whiteboard_text,
+            archive=context.archive_text,
+            summarized_history=context.summarized_history,
+            recent_messages=context.recent_messages,
+            action_instruction=action,
+            language=language,
+        )
+        try:
+            result = llm.chat_structured(messages, RoundAnalysis)
+            if result:
+                logger.info(
+                    f"[Scribe] RoundAnalysis: {len(result.arguments)} args, "
+                    f"{len(result.new_angles)} new angles, "
+                    f"{len(result.covered_dimensions)} dims covered"
+                )
+            return result
+        except Exception as e:
+            logger.warning(f"Round analysis failed: {e}")
+            return None
+
+    def _build_analysis_action(self, dimension_labels: list[str], anchor_question: str = "") -> str:
+        """构建记录员分析的 action instruction"""
+        if dimension_labels:
+            dim_list = "\n".join(f"  - {label}" for label in dimension_labels)
+        else:
+            dim_list = "  （尚未初始化）"
+
+        anchor_section = ""
+        if anchor_question:
+            anchor_section = f"""
+
+5. 检查锚定问题是否被回应：
+   本轮锚定问题：{anchor_question}
+
+   请判断：
+   - was_addressed: 是否有发言者实质性回应了这个问题？（不是只提了一嘴，而是认真回答）
+   - quality: 回应质量如何？
+     - "deep"：深入分析，给出了具体论据或场景
+     - "surface"：提到了但没有深入
+     - "token"：只用一句话敷衍了一下，然后转向了其他话题
+     - "ignored"：完全没有回应
+   - who_addressed: 谁回应了（角色名列表）
+   - evidence: 引用发言中的原句作为证据
+   - needs_escalation: 如果 quality 是 "token" 或 "ignored"，设为 true"""
+
+        return f"""你是本轮的记录员。请阅读本轮所有发言，输出结构化分析。
+
+你需要做：
+1. 提取每个发言者的核心主张（一句话）
+2. 标记本轮是否引入了新的讨论角度（不在以下已知维度列表中的）
+3. 标记本轮触及了以下已知维度中的哪些（附证据，confidence 为 high 或 low）
+4. 一句话判断：当前讨论是否有收敛到某个狭窄方向的趋势
+{anchor_section}
+
+已知维度列表：
+{dim_list}
+
+你不需要做：
+- 判断讨论应该往哪个方向走
+- 评判哪个观点更好
+- 提出新的讨论问题
+
+去重规则：
+- 如果你发现的新角度与已知维度中的任何一个实质相同（只是措辞不同），
+  不要标记为 new_angle，而是标记为对应维度的 covered。"""

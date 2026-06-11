@@ -233,6 +233,10 @@ class SchedulingState:
     # CLOSING 窗口
     # -------------------------------------------------------------------
 
+    def get_latest_novelty(self) -> float:
+        """获取最新一轮的新颖度分数。无数据时返回 0.5（中性）。"""
+        return self.novelty_scores[-1] if self.novelty_scores else 0.5
+
     def get_closing_window(self, max_rounds: int) -> int:
         """计算 closing_window 大小。使用 sqrt 曲线，上界 5。"""
         return max(self.closing_window_min, min(self.closing_window_max, math.ceil(math.sqrt(max_rounds))))
@@ -294,6 +298,82 @@ class SchedulingState:
             "exhausted": max(10, round(num_participants * 2.5)),
         }
 
+    def apply_strategy_constraint(
+        self,
+        decision: AgendaDecision,
+        strategy,  # StrategyOutput | None
+        all_intents: dict,
+        participants: list,
+    ) -> tuple[list[str], set[str]]:
+        """将战略约束融入选人逻辑。
+
+        设计原则：没有 avoid_agents。战略家只指定"谁更适合"（preferred_agents），
+        不指定"谁不适合"。全员进入候选池，preferred_agents 获得优先级提升，
+        但无人被硬删除。
+
+        Args:
+            decision: 主持人的决策
+            strategy: 战略家的输出（StrategyOutput 或 None）
+            all_intents: 所有参与者的意图信号
+            participants: 参与者列表
+
+        Returns:
+            (final_speakers, forced_callouts)
+            - final_speakers: 最终发言人列表
+            - forced_callouts: 被强制点名的 agent ID 集合
+        """
+        if not strategy or not strategy.direction.preferred_agents:
+            return list(decision.speakers or []), set()
+
+        preferred = set(strategy.direction.preferred_agents)
+
+        # 红线保护：沉默太久的 agent（不受战略约束影响）
+        all_ids = [a.agent_id for a in participants]
+        max_speakers = len(all_ids) // 2 + 1
+        threshold = self.silence_threshold(len(all_ids), max_speakers)
+        red_line = set()
+        for agent_id, silence_count in self.consecutive_silence.items():
+            if silence_count >= threshold:
+                red_line.add(agent_id)
+
+        # 强制点名：preferred 中 energy 为 "low" 的 agent
+        forced_callouts = set()
+        for agent_id in preferred:
+            if agent_id in all_intents:
+                intent = all_intents[agent_id]
+                if hasattr(intent, 'energy') and intent.energy == "low":
+                    if agent_id not in red_line:
+                        forced_callouts.add(agent_id)
+
+        # 重新排序：红线 > preferred > 其他
+        def sort_key(agent_id):
+            if agent_id in red_line:
+                return 0
+            if agent_id in preferred:
+                return 1
+            return 2
+
+        # 候选池：当前 speakers + preferred + red_line
+        current_speakers = set(decision.speakers or [])
+        all_candidates = current_speakers | preferred | red_line
+        ranked = sorted(all_candidates, key=sort_key)
+        final = ranked[:max_speakers]
+
+        # 保底：至少 max_speakers 人发言（与主持人选人上限一致）
+        if len(final) < max_speakers:
+            # 从有意图的参与者中补充（按沉默轮次排序，最沉默的优先）
+            silence_ranked = sorted(
+                [aid for aid in all_ids if aid not in final and aid in all_intents],
+                key=lambda aid: self.consecutive_silence.get(aid, 0),
+                reverse=True,
+            )
+            for aid in silence_ranked:
+                if len(final) >= max_speakers:
+                    break
+                final.append(aid)
+
+        return final, forced_callouts
+
     def post_process(
         self,
         decision: AgendaDecision,
@@ -324,6 +404,9 @@ class SchedulingState:
                     )
                 else:
                     # 尚未充分探索 → 强制转移
+                    # Phase 2 变更：PhaseState 是 phase 唯一权威源，
+                    # 此处的 phase 修改会被 salon.py 中 directive.phase 覆盖。
+                    # 保留此行仅为向后兼容（无 SessionController 时仍生效）。
                     decision.phase = "DEEPENING"
                     shift_notice = (
                         "核心论点已趋于稳定但仍在重复。"

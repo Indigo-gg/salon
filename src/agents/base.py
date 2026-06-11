@@ -145,6 +145,7 @@ class BaseAgent:
         self.name = self.soul.name
         self.role = "participant"
         self.config = config
+        self._last_thinking: str = ""  # 最近一次发言的原生思维链（Mode A）
 
     def get_system_prompt(self) -> str:
         return self.soul.get_full_prompt()
@@ -205,7 +206,9 @@ class BaseAgent:
         # 无工具：单步调用，行为不变
         if not tools or not tools.has_tools():
             try:
-                return llm.chat_structured(messages, SpeechOutput)
+                result = llm.chat_structured(messages, SpeechOutput)
+                self._last_thinking = llm.last_structured_thinking
+                return result
             except Exception as e:
                 logger.error(f"Failed to generate speech for {self.name}: {e}")
                 fallback_speech = self._extract_speech_from_error(str(e))
@@ -291,7 +294,9 @@ class BaseAgent:
                 messages.append({"role": "user", "content": final_note})
 
         try:
-            return llm.chat_structured(messages, SpeechOutput)
+            result = llm.chat_structured(messages, SpeechOutput)
+            self._last_thinking = llm.last_structured_thinking
+            return result
         except Exception as e:
             logger.error(f"Failed to generate speech after tool loop for {self.name}: {e}")
             fallback_speech = self._extract_speech_from_error(str(e))

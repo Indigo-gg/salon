@@ -6,10 +6,12 @@ import re
 import time
 from typing import Generator, Type
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel
 
 from src.config import LLMConfig
+from src.llm.token_tracker import TokenUsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -196,17 +198,20 @@ def _fill_missing_fields(schema: type[BaseModel], data: dict) -> dict:
 
 
 class LLMClient:
-    def __init__(self, config: LLMConfig):
+    def __init__(self, config: LLMConfig, tracker: TokenUsageTracker | None = None):
         self.model = config.model
         self.temperature = config.temperature
         self.max_tokens = config.max_tokens
         self.retry_count = config.retry_count
         self.retry_delay = config.retry_delay
         self.use_native_thinking = config.use_native_thinking
+        self.tracker = tracker
+        self.last_thinking: str = ""  # 最近一次 API 调用的思维链内容（仅 Mode A）
+        self.last_structured_thinking: str = ""  # chat_structured 解析成功时的思维链
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.api_base,
-            timeout=config.timeout,
+            timeout=httpx.Timeout(connect=10.0, read=float(config.timeout), write=30.0, pool=10.0),
         )
 
     def close(self) -> None:
@@ -217,6 +222,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        _call_type: str = "chat",
     ) -> str:
         last_error: Exception | None = None
         for attempt in range(self.retry_count):
@@ -234,15 +240,29 @@ class LLMClient:
                 completion = self._client.chat.completions.create(**kwargs)
                 msg = completion.choices[0].message
                 content = msg.content or ""
-                # 部分推理模型（如 o1/o3）把推理内容放在 reasoning_content 字段
-                # 如果 content 为空但有 reasoning_content，用它兜底
-                if not content and hasattr(msg, 'reasoning_content') and msg.reasoning_content:
-                    content = msg.reasoning_content
+                # 捕获思维链内容（用于复盘）
+                self.last_thinking = ""
+                if hasattr(msg, 'reasoning_content') and msg.reasoning_content:
+                    self.last_thinking = msg.reasoning_content
+                    # 部分推理模型（如 o1/o3）把推理内容放在 reasoning_content 字段
+                    # 如果 content 为空但有 reasoning_content，用它兜底
+                    if not content:
+                        content = msg.reasoning_content
                 reason = completion.choices[0].finish_reason
                 if not content:
                     logger.warning(f"LLM returned empty content (attempt {attempt + 1}), finish_reason={reason}")
                 elif reason == "length":
                     logger.warning(f"LLM output truncated at {effective_max} tokens, content_len={len(content)}")
+                # 记录 token 用量
+                if self.tracker and completion.usage:
+                    u = completion.usage
+                    self.tracker.record(
+                        model=self.model,
+                        call_type=_call_type,
+                        prompt_tokens=u.prompt_tokens or 0,
+                        completion_tokens=u.completion_tokens or 0,
+                        total_tokens=u.total_tokens or 0,
+                    )
                 return content
             except Exception as e:
                 last_error = e
@@ -275,6 +295,7 @@ class LLMClient:
                     "temperature": temperature if temperature is not None else self.temperature,
                     "max_tokens": max_tokens or self.max_tokens,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                 }
                 if self.use_native_thinking:
                     kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
@@ -285,8 +306,12 @@ class LLMClient:
                 total_chunks = 0
                 first_chunk_info = None
                 last_chunk_info = None
+                stream_usage = None
                 for chunk in stream:
                     total_chunks += 1
+                    # 捕获流末尾的 usage 信息
+                    if hasattr(chunk, 'usage') and chunk.usage:
+                        stream_usage = chunk.usage
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]
@@ -306,6 +331,15 @@ class LLMClient:
                     if choice.delta.content:
                         chunk_count += 1
                         yield choice.delta.content
+                # 记录 token 用量
+                if self.tracker and stream_usage:
+                    self.tracker.record(
+                        model=self.model,
+                        call_type="stream",
+                        prompt_tokens=stream_usage.prompt_tokens or 0,
+                        completion_tokens=stream_usage.completion_tokens or 0,
+                        total_tokens=stream_usage.total_tokens or 0,
+                    )
                 # 流结束后检查
                 if chunk_count == 0:
                     logger.warning(
@@ -356,7 +390,7 @@ class LLMClient:
             enhanced_messages.append({"role": "user", "content": format_instruction})
 
         last_error: Exception | None = None
-        structured_max = max(self.max_tokens, 10000)  # Extra room for structured JSON
+        structured_max = max(self.max_tokens, 4000)  # Extra room for structured JSON
         max_attempts = 3  # 增加到3次
 
         for attempt in range(max_attempts):
@@ -368,6 +402,7 @@ class LLMClient:
                     enhanced_messages,
                     temperature=temperature,
                     max_tokens=attempt_max,
+                    _call_type="structured",
                 )
             except RuntimeError as e:
                 # chat() 内部已经重试过了，这里是最终失败
@@ -379,6 +414,7 @@ class LLMClient:
             try:
                 parsed = self._extract_json(raw)
                 parsed = _fill_missing_fields(schema, parsed)
+                self.last_structured_thinking = self.last_thinking
                 return schema.model_validate(parsed)
             except (ValueError, Exception) as e:
                 last_error = e
@@ -416,14 +452,28 @@ class LLMClient:
                             ),
                         })
                     else:
-                        enhanced_messages.append({
-                            "role": "user",
-                            "content": (
-                                "Your response was not valid JSON. "
-                                "Please respond again with ONLY a valid JSON object, no markdown, no explanation. "
-                                f"Required fields: {list(schema.model_fields.keys())}"
-                            ),
-                        })
+                        # 检测是否是 thinking 文本泄漏（没有 JSON 结构）
+                        is_thinking_leak = not raw.strip().startswith("{") and not raw.strip().startswith("```")
+                        if is_thinking_leak:
+                            enhanced_messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Your previous response was thinking/reasoning text, NOT JSON. "
+                                    "You MUST respond with ONLY a valid JSON object. "
+                                    "Do NOT include any thinking, analysis, or explanation. "
+                                    "Just the raw JSON object, nothing else.\n"
+                                    f"Required fields: {list(schema.model_fields.keys())}"
+                                ),
+                            })
+                        else:
+                            enhanced_messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Your response was not valid JSON. "
+                                    "Please respond again with ONLY a valid JSON object, no markdown, no explanation. "
+                                    f"Required fields: {list(schema.model_fields.keys())}"
+                                ),
+                            })
 
         raise RuntimeError(f"Failed to get valid structured output after {max_attempts} attempts: {last_error}")
 

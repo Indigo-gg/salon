@@ -120,6 +120,7 @@ class SharedWhiteboard:
             "active_concepts": "活跃概念清单",
             "search_materials": "检索素材池",
             "concept_load": "概念负荷状态",
+            "dimension_map": "讨论维度地图",
         }
         for key, entries in self.sections.items():
             if not entries:
@@ -214,6 +215,7 @@ class SharedWhiteboard:
             "active_concepts": "活跃概念清单",
             "search_materials": "检索素材池",
             "concept_load": "概念负荷状态",
+            "dimension_map": "讨论维度地图",
         }
 
         # 活跃条目

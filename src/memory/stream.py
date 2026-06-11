@@ -60,7 +60,6 @@ class ConversationStream:
     def __init__(self, config: ConversationStreamConfig):
         self.messages: list[Message] = []
         self.summaries: list[Summary] = []
-        self.recent_count = config.recent_messages_count
         self.summary_batch_size = config.summary_batch_size
 
     def add_message(self, message: Message) -> None:
@@ -70,8 +69,9 @@ class ConversationStream:
     def regular_messages(self) -> list[Message]:
         return [m for m in self.messages if m.speech_type != "intent"]
 
-    def get_recent_messages(self) -> list[Message]:
-        return self.regular_messages[-self.recent_count:]
+    def get_recent_messages(self, max_rounds: int = 3) -> list[Message]:
+        """Return messages from the last max_rounds rounds."""
+        return self.get_recent_round_messages(max_rounds)
 
     def get_summarized_history(self) -> str:
         if not self.summaries:
@@ -81,12 +81,12 @@ class ConversationStream:
     def get_all_messages_text(self) -> str:
         return "\n".join(m.to_prompt_line() for m in self.messages if m.speech_type != "intent")
 
-    def get_recent_messages_text(self) -> str:
-        return "\n".join(m.to_prompt_line() for m in self.get_recent_messages() if m.speech_type != "intent")
+    def get_recent_messages_text(self, max_rounds: int = 3) -> str:
+        return "\n".join(m.to_prompt_line() for m in self.get_recent_messages(max_rounds) if m.speech_type != "intent")
 
     def get_recent_messages_brief(self, n: int = 3, max_chars: int = 80) -> str:
         """Condensed recent messages for intent generation. Truncates each message."""
-        recent = [m for m in self.messages if m.speech_type != "intent"][-n:]
+        recent = self.get_recent_round_messages(max_rounds=2)[-n:]
         lines = []
         for m in recent:
             content = m.content[:max_chars] + ("..." if len(m.content) > max_chars else "")
@@ -139,30 +139,19 @@ class ConversationStream:
                 break
         return count
 
-    def get_messages_for_summarization(self) -> list[Message] | None:
-        """Return the oldest batch of messages that should be summarized, or None."""
+    def get_messages_for_summarization(self, max_rounds: int) -> list[Message] | None:
+        """Return the oldest batch of messages older than max_rounds, or None."""
         regular = self.regular_messages
-        if len(regular) <= self.recent_count:
+        if not regular:
             return None
-        unsummarized_count = len(regular) - self.recent_count
-        already_summarized = sum(1 for _ in self.summaries) * self.summary_batch_size
-        remaining = unsummarized_count - already_summarized
-        if remaining >= self.summary_batch_size:
-            start = already_summarized
-            return regular[start:start + self.summary_batch_size]
+        last_round = regular[-1].round
+        cutoff = last_round - max_rounds + 1
+        old_messages = [m for m in regular if m.round < cutoff]
+        already_summarized = len(self.summaries) * self.summary_batch_size
+        unsummarized = old_messages[already_summarized:]
+        if len(unsummarized) >= self.summary_batch_size:
+            return unsummarized[:self.summary_batch_size]
         return None
-
-    def get_unsummarized_overflow(self) -> list[Message]:
-        """Return messages that have fallen outside the sliding window but haven't been summarized yet.
-        These would otherwise be invisible to agents, causing logical breaks."""
-        regular = self.regular_messages
-        if len(regular) <= self.recent_count:
-            return []
-        overflow_end = len(regular) - self.recent_count
-        already_summarized = sum(1 for _ in self.summaries) * self.summary_batch_size
-        if already_summarized >= overflow_end:
-            return []
-        return regular[already_summarized:overflow_end]
 
     def add_summary(self, text: str, from_round: int, to_round: int) -> None:
         self.summaries.append(Summary(text=text, from_round=from_round, to_round=to_round))

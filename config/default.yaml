@@ -24,6 +24,7 @@ discussion:
   min_speech_chars: 50                       # 每轮发言最少字数（避免敷衍）
   default_participant_count: 3               # 默认参与者数量 (3-5)
   topic_exhaustion_check_interval: 5         # 每隔几轮主持人检查议题是否充分讨论
+  max_rounds_per_dimension: 8                # 每维度最大讨论轮次（硬截断，DimensionState 使用）
   default_moderator: "moderator"              # 默认主持人的 agent ID，可在启动时通过 --moderator 覆盖
   default_scribe: "scribe"                    # 默认记录员的 agent ID，可在启动时通过 --scribe 覆盖
 
@@ -59,7 +60,6 @@ monitor:
 memory:
   # 对话流 (第 1 层)
   conversation_stream:
-    recent_messages_count: 12                # 保留完整的最近消息条数
     summary_batch_size: 5                    # 每次摘要化的消息批次大小
 
   # 个人笔记本 (第 2 层)
@@ -89,6 +89,7 @@ memory:
       - "surprises"                          # 意外发现（超过 3 轮未提及自动丢弃）
       - "agenda_trace"                       # 议程轨迹（记录讨论路线和阶段变迁）
       - "active_concepts"                    # 活跃概念清单（由记录员维护的隐喻/术语/概念追踪）
+      - "dimension_map"                      # 讨论维度地图（由战略家初始化，记录员维护）
 
   # 档案馆 (第 4 层)
   archive:
@@ -116,7 +117,7 @@ context:
     action_prompt: 200                       # 发言指令
   reserve_for_generation: 2000               # 预留给模型生成的 token 数
   # 按行动类型的 token 预算（减少不必要的上下文浪费）
-  intent_max_tokens: 800                     # 意图收集：仅 topic + 白板焦点 + 上轮摘要
+  intent_max_tokens: 1200                    # 意图收集：topic + 白板焦点 + 最近 1 轮 + 上轮摘要
   speak_max_tokens: 5000                     # 发言：topic + 白板 + 最近 2 轮 + 摘要 + 笔记本
   moderator_max_tokens: 8000                 # 主持人决策：topic + 全景白板 + 最近 3 轮 + 摘要
   scribe_max_tokens: 3000                    # 记录员同步：topic + 全景白板 + 最近 2 轮

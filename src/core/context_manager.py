@@ -35,7 +35,7 @@ class ContextManager:
 
         Args:
             context_type: 上下文类型，决定组装哪些内容和使用哪个 token 预算。
-                - "intent": 极简，仅 topic + 白板焦点 + 上轮摘要
+                - "intent": 极简，topic + 白板焦点 + 最近 1 轮 + 上轮摘要
                 - "speak": 精简，topic + 白板焦点 + 最近 2 轮 + 摘要 + 笔记本
                 - "moderator": 较完整，topic + 全景白板 + 最近 3 轮 + 摘要
                 - "scribe": 白板+近期，topic + 全景白板 + 最近 2 轮
@@ -62,16 +62,19 @@ class ContextManager:
         # --- intent 模式：极简上下文 ---
         if context_type == "intent":
             last_summary = memory.stream.get_last_round_summary()
-            # 只用白板焦点 + 上轮摘要，截断到预算
+            recent = memory.stream.get_recent_round_messages(max_rounds=1)
+            recent_text = "\n".join(m.to_prompt_line() for m in recent)
+            # 白板焦点 + 上轮摘要 + 最近 1 轮消息，截断到预算
             sections = {
                 "whiteboard": whiteboard_brief,
+                "recent_messages": recent_text,
                 "summarized_history": last_summary,
             }
             sections = self._truncate_to_budget(sections, max_tokens=max_tokens)
             return DiscussionContext(
                 topic=topic_text,
-                recent_messages=[],
-                recent_messages_text="",
+                recent_messages=recent,
+                recent_messages_text=sections["recent_messages"],
                 summarized_history=sections["summarized_history"],
                 whiteboard_text="",
                 whiteboard_brief=sections["whiteboard"],
@@ -105,7 +108,7 @@ class ContextManager:
         if context_type == "moderator":
             recent = memory.stream.get_recent_round_messages(max_rounds=3)
             recent_text = "\n".join(m.to_prompt_line() for m in recent)
-            summarized_history = self._build_summarized_with_overflow(memory)
+            summarized_history = memory.stream.get_summarized_history()
             sections = {
                 "whiteboard": whiteboard_text,
                 "recent_messages": recent_text,
@@ -127,7 +130,7 @@ class ContextManager:
         # --- speak 模式（默认）：白板焦点 + 最近 2 轮 + 摘要 + 笔记本 ---
         recent = memory.stream.get_recent_round_messages(max_rounds=2)
         recent_text = "\n".join(m.to_prompt_line() for m in recent)
-        summarized_history = self._build_summarized_with_overflow(memory)
+        summarized_history = memory.stream.get_summarized_history()
 
         sections = {
             "recent_messages": recent_text,
@@ -154,19 +157,6 @@ class ContextManager:
             agent_memory_text=agent_memory_text,
         )
 
-    def _build_summarized_with_overflow(self, memory: MemorySystem) -> str:
-        """构建包含未摘要溢出消息的摘要历史文本。"""
-        summarized_history = memory.stream.get_summarized_history()
-        overflow = memory.stream.get_unsummarized_overflow()
-        if overflow:
-            overflow_text = "\n".join(
-                f"[第{m.round}轮] {m.agent_name}: {m.content}" for m in overflow
-            )
-            if summarized_history:
-                return f"[未摘要的早期对话]\n{overflow_text}\n\n{summarized_history}"
-            return f"[未摘要的早期对话]\n{overflow_text}"
-        return summarized_history
-
     def _compute_used_arguments(self, agent_id: str, memory: MemorySystem) -> list[str]:
         """从白板 active_concepts × agent 历史发言中动态计算已使用的论据。"""
         concepts = [
@@ -176,7 +166,7 @@ class ContextManager:
         if not concepts:
             return []
 
-        recent = memory.stream.get_recent_messages()
+        recent = memory.stream.get_recent_messages(max_rounds=3)
         used = []
         for msg in recent:
             if msg.agent_id == agent_id:
